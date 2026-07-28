@@ -55,6 +55,25 @@ async def report(body: ReportBody, req: Request):
 async def ping():
     return "pong"
 
+@app.post("/activity/clean")
+async def clean_empty(req: Request):
+    """删除所有 app_name 为空或空白字符的记录"""
+    try:
+        auth = req.headers.get("Authorization", "")
+        if AUTH_TOKEN and auth != f"Bearer {AUTH_TOKEN}":
+            raise HTTPException(401, "Unauthorized")
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM records WHERE TRIM(app_name) = ''")
+        deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        return {"status": "ok", "deleted": deleted}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"清理失败: {str(e)}")
+
 @app.get("/activity/summary")
 async def summary():
     try:
@@ -68,6 +87,8 @@ async def summary():
         sessions, opens = {}, {}
         for r in rows:
             app_name, ev, ts = r
+            if not app_name.strip():
+                continue
             if ev == "open":
                 opens[app_name] = datetime.fromisoformat(ts)
             elif ev == "close" and app_name in opens:
@@ -75,7 +96,7 @@ async def summary():
                 sessions[app_name] = sessions.get(app_name, 0) + gap
                 del opens[app_name]
         return {
-            "recent_apps": [r[0] for r in recent],
+            "recent_apps": [r[0] for r in recent if r[0].strip()],
             "sessions": sessions
         }
     except Exception as e:
