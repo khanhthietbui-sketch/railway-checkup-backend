@@ -1,4 +1,4 @@
-import sqlite3, os, sys
+import sqlite3, os, sys, asyncio
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException, Query
@@ -8,6 +8,7 @@ import uvicorn
 
 DB_PATH = "/tmp/records.db"
 JST = timedelta(hours=9)
+CN_TZ = timezone(timedelta(hours=8))  # 北京时间
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")
 
 def init_db():
@@ -42,6 +43,27 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 class ReportBody(BaseModel):
     app_name: str
     event: str
+
+async def daily_reset():
+    """每天北京时间 0 点整清空全部查岗记录，避免时长跨天无限叠加。"""
+    while True:
+        now = datetime.now(CN_TZ)
+        next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        wait_secs = max((next_midnight - now).total_seconds(), 1)
+        await asyncio.sleep(wait_secs)
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("DELETE FROM records")
+            conn.commit()
+            conn.close()
+            print(f"[daily_reset] {datetime.now(CN_TZ)} 已清空查岗记录，开始新一天计时", file=sys.stderr)
+        except Exception as e:
+            print(f"[daily_reset] 清空失败: {e}", file=sys.stderr)
+
+@app.on_event("startup")
+async def on_startup():
+    asyncio.create_task(daily_reset())
+    print(f"[startup] 每日0点自动重置已开启（北京时间）", file=sys.stderr)
 
 @app.post("/report")
 async def report(body: ReportBody, req: Request):
