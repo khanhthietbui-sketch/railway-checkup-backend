@@ -37,6 +37,38 @@ def require_auth(req: Request):
         if auth != f"Bearer {AUTH_TOKEN}":
             raise HTTPException(401, "Unauthorized")
 
+def compute_sessions(rows):
+    """
+    计算每个 App 的使用时长。
+    - open 开始计时，close 结算。
+    - 若从 App A 切换到 App B（收到 B 的 open 而 A 还没 close），
+      自动把 A 从打开到切换的时间补算进时长，避免依赖 iOS 的关闭触发。
+    """
+    sessions = {}
+    current_app = None
+    current_open_ts = None
+    for r in rows:
+        an, ev, ts = r["app_name"], r["event"], r["timestamp"]
+        if not an.strip():
+            continue
+        ts = datetime.fromisoformat(ts)
+        if ev == "open":
+            # 如果正有 App 在计时且不是当前这个，先补算上一个 App
+            if current_app is not None and current_app != an and current_open_ts is not None:
+                gap = int((ts - current_open_ts).total_seconds())
+                if gap > 0:
+                    sessions[current_app] = sessions.get(current_app, 0) + gap
+            current_app = an
+            current_open_ts = ts
+        elif ev == "close":
+            if current_app is not None and current_open_ts is not None and current_app == an:
+                gap = int((ts - current_open_ts).total_seconds())
+                if gap > 0:
+                    sessions[an] = sessions.get(an, 0) + gap
+                current_app = None
+                current_open_ts = None
+    return sessions
+
 app = FastAPI(title="查岗系统")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -70,8 +102,7 @@ async def report(body: ReportBody, req: Request):
     require_auth(req)
     now = datetime.now(timezone.utc).isoformat()
     conn = get_db()
-    conn.execute("INSERT INTO records (app_name, event, timestamp) VALUES (?, ?, ?)",
-                 (body.app_name, body.event, now))
+    conn.execute("INSERT INTO records (app_name, event, timestamp) VALUES (?, ?, ?)", (body.app_name, body.event, now))
     conn.commit()
     conn.close()
     return {"status": "ok"}
@@ -100,17 +131,7 @@ async def summary():
     cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id ASC")
     rows = cur.fetchall()
     conn.close()
-    sessions, opens = {}, {}
-    for r in rows:
-        app_name, ev, ts = r["app_name"], r["event"], r["timestamp"]
-        if not app_name.strip():
-            continue
-        if ev == "open":
-            opens[app_name] = datetime.fromisoformat(ts)
-        elif ev == "close" and app_name in opens:
-            gap = int((datetime.fromisoformat(ts) - opens[app_name]).total_seconds())
-            sessions[app_name] = sessions.get(app_name, 0) + gap
-            del opens[app_name]
+    sessions = compute_sessions(rows)
     return {"recent_apps": [r["app_name"] for r in recent if r["app_name"].strip()], "sessions": sessions}
 
 @app.get("/activity/trend")
@@ -160,19 +181,12 @@ async def daily_summary(date_str: str = Query(None, description="日期 YYYY-MM-
     conn.close()
     if not rows:
         return {"date": date_str, "apps": [], "total_usage_secs": 0, "message": "当天无记录"}
-    sessions, opens, app_list = {}, {}, []
+    app_list = []
     for r in rows:
-        an, ev, ts = r["app_name"], r["event"], r["timestamp"]
-        if not an.strip():
-            continue
-        if an not in app_list:
+        an = r["app_name"]
+        if an.strip() and an not in app_list:
             app_list.append(an)
-        if ev == "open":
-            opens[an] = datetime.fromisoformat(ts)
-        elif ev == "close" and an in opens:
-            gap = int((datetime.fromisoformat(ts) - opens[an]).total_seconds())
-            sessions[an] = sessions.get(an, 0) + gap
-            del opens[an]
+    sessions = compute_sessions(rows)
     total = sum(sessions.values())
     apps_detail = sorted([{"app": k, "secs": v} for k, v in sessions.items()], key=lambda x: x["secs"], reverse=True)
     return {"date": date_str, "apps": app_list, "usage": apps_detail, "total_usage_secs": total}
