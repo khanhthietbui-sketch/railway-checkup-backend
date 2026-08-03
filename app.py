@@ -85,14 +85,6 @@ class ReportBody(BaseModel):
     app_name: str
     event: str
 
-class DeviceBody(BaseModel):
-    battery: str = ""
-    device_name: str = ""
-    brightness: str = ""
-    volume: str = ""
-    address: str = ""
-    weather: str = ""
-
 async def daily_reset():
     """每天北京时间 0 点整清空全部查岗记录，避免时长跨天无限叠加。"""
     while True:
@@ -125,13 +117,19 @@ async def report(body: ReportBody, req: Request):
     return {"status": "ok"}
 
 @app.post("/device/report")
-async def device_report(body: DeviceBody, req: Request):
+async def device_report(payload: dict, req: Request):
     require_auth(req)
     now = datetime.now(timezone.utc).isoformat()
+    battery = payload.get("battery", "")
+    device_name = payload.get("device_name") or payload.get("device", "")
+    brightness = payload.get("brightness", "")
+    volume = payload.get("volume", "")
+    address = payload.get("address") or payload.get("location", "")
+    weather = payload.get("weather", "")
     conn = get_db()
     conn.execute(
         "INSERT INTO device_snapshots (battery, device_name, brightness, volume, address, weather, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (body.battery, body.device_name, body.brightness, body.volume, body.address, body.weather, now))
+        (battery, device_name, brightness, volume, address, weather, now))
     conn.commit()
     conn.close()
     return {"status": "ok"}
