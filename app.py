@@ -18,6 +18,15 @@ def init_db():
         app_name TEXT NOT NULL,
         event TEXT NOT NULL,
         timestamp TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS device_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        battery TEXT,
+        device_name TEXT,
+        brightness TEXT,
+        volume TEXT,
+        address TEXT,
+        weather TEXT,
+        timestamp TEXT NOT NULL)""")
     conn.commit()
     conn.close()
 
@@ -76,6 +85,14 @@ class ReportBody(BaseModel):
     app_name: str
     event: str
 
+class DeviceBody(BaseModel):
+    battery: str = ""
+    device_name: str = ""
+    brightness: str = ""
+    volume: str = ""
+    address: str = ""
+    weather: str = ""
+
 async def daily_reset():
     """每天北京时间 0 点整清空全部查岗记录，避免时长跨天无限叠加。"""
     while True:
@@ -103,6 +120,18 @@ async def report(body: ReportBody, req: Request):
     now = datetime.now(timezone.utc).isoformat()
     conn = get_db()
     conn.execute("INSERT INTO records (app_name, event, timestamp) VALUES (?, ?, ?)", (body.app_name, body.event, now))
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
+
+@app.post("/device/report")
+async def device_report(body: DeviceBody, req: Request):
+    require_auth(req)
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO device_snapshots (battery, device_name, brightness, volume, address, weather, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (body.battery, body.device_name, body.brightness, body.volume, body.address, body.weather, now))
     conn.commit()
     conn.close()
     return {"status": "ok"}
@@ -190,6 +219,17 @@ async def daily_summary(date_str: str = Query(None, description="日期 YYYY-MM-
     total = sum(sessions.values())
     apps_detail = sorted([{"app": k, "secs": v} for k, v in sessions.items()], key=lambda x: x["secs"], reverse=True)
     return {"date": date_str, "apps": app_list, "usage": apps_detail, "total_usage_secs": total}
+
+@app.get("/device/status")
+async def device_status():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT battery, device_name, brightness, volume, address, weather, timestamp FROM device_snapshots ORDER BY id DESC LIMIT 1")
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return {"battery": None, "device_name": None, "brightness": None, "volume": None, "address": None, "weather": None, "timestamp": None, "message": "暂无设备状态"}
+    return {"battery": row["battery"], "device_name": row["device_name"], "brightness": row["brightness"], "volume": row["volume"], "address": row["address"], "weather": row["weather"], "timestamp": row["timestamp"]}
 
 @app.get("/status")
 async def server_status():
